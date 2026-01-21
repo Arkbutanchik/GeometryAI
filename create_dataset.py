@@ -4,7 +4,7 @@ import os
 import shutil
 import math
 
-GENERATE = 1000
+GENERATE = 10000
 ANGLE_THRESHOLD = 10
 CANVAS = 100
 
@@ -53,7 +53,7 @@ def check_quantity():
 
 i = 1
 while check_quantity():
-    cmin, cmax = 0.05 * CANVAS, 0.95 * CANVAS
+    cmin, cmax = int(0.05 * CANVAS), int(0.95 * CANVAS)
     p1 = (random.randint(cmin, cmax), random.randint(cmin, cmax))
     p2 = (random.randint(cmin, cmax), random.randint(cmin, cmax))
     p3 = (random.randint(cmin, cmax), random.randint(cmin, cmax))
