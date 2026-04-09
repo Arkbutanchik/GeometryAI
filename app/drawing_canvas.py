@@ -1,5 +1,6 @@
 import tkinter as tk
 from typing import List, Tuple
+from PIL import Image, ImageDraw
 
 class DrawingCanvas(tk.Canvas):
 
@@ -67,3 +68,19 @@ class DrawingCanvas(tk.Canvas):
     def get_image_data(self):
 
         return self.postscript(colormode="color")
+
+    def render_to_image(self, output_size=(100, 100)):
+        """Рендерит содержимое холста в PIL Image без PostScript."""
+        img = Image.new("RGB", output_size, "white")
+        if len(self.points) < 2:
+            return img
+
+        draw = ImageDraw.Draw(img)
+        scale_x = output_size[0] / float(self.width)
+        scale_y = output_size[1] / float(self.height)
+        scaled_points = [(int(x * scale_x), int(y * scale_y)) for x, y in self.points]
+
+        draw.line(scaled_points, fill="black", width=2)
+        if len(scaled_points) >= 3:
+            draw.line([scaled_points[-1], scaled_points[0]], fill="black", width=2)
+        return img

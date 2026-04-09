@@ -9,7 +9,7 @@ class TriangleType(Enum):
     
     def __str__(self):
         return self.value
-# результат от нейросетки
+
 @dataclass
 class MusicResult:
 
@@ -17,7 +17,6 @@ class MusicResult:
     audio_file_path: str
     metadata: Dict[str, float]
 
-# запрос к нейросетке
 @dataclass
 class PredictionRequest:
 
