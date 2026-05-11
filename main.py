@@ -2,14 +2,21 @@ import math
 import os
 import threading
 import time
+import wave
 from enum import Enum
+from tkinter import filedialog, messagebox
 
 import numpy as np
 import tkinter as tk
 
+from view import TriangleMusicView
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+SAMPLE_RATE = 44100
+SAVE_FADE_OUT_SEC = 0.18
 
 
 def midi_name(m):
@@ -21,7 +28,15 @@ class TriangleType(Enum):
     OBTUSE = "obtuse"
     RIGHT  = "right"
 
-#фейк нейра
+
+TYPE_LABEL = {
+    TriangleType.ACUTE:  "ACUTE",
+    TriangleType.OBTUSE: "OBTUSE",
+    TriangleType.RIGHT:  "RIGHT",
+}
+
+
+
 def classify_triangle(p1, p2, p3):
     def d2(a, b):
         return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
@@ -41,6 +56,68 @@ def perimeter_ratio(points, canvas_w, canvas_h):
 
 
 
+
+def _find_sample_path(sample_filename):
+    name_no_ext, _ = os.path.splitext(sample_filename)
+    candidate_names = [sample_filename, name_no_ext + ".wav",
+                       name_no_ext + ".ogg", name_no_ext + ".mp3"]
+
+    search_dirs = [
+        os.path.join(BASE_DIR, "samples"),
+        os.path.join(os.getcwd(), "samples"),
+        BASE_DIR,
+        os.getcwd(),
+        os.path.join(BASE_DIR, "assets", "samples"),
+        os.path.join(BASE_DIR, "sounds"),
+    ]
+
+    for d in search_dirs:
+        for n in candidate_names:
+            p = os.path.join(d, n)
+            if os.path.exists(p):
+                return p
+
+    if os.path.isabs(sample_filename) and os.path.exists(sample_filename):
+        return sample_filename
+    return None
+
+
+def _load_sample_array(sample_filename):
+    import pygame
+    sample_path = _find_sample_path(sample_filename)
+    if sample_path is None:
+        raise FileNotFoundError(
+            f"Sample file not found: {sample_filename}\n"
+            f"Looked in: ./samples, {BASE_DIR}/samples, project root."
+        )
+    if not pygame.mixer.get_init():
+        pygame.mixer.init(frequency=SAMPLE_RATE, size=-16, channels=2, buffer=512)
+    snd = pygame.mixer.Sound(sample_path)
+    arr = pygame.sndarray.array(snd)
+    return arr
+
+
+def _shift_sample(base_array, target_midi, base_midi, gain=1.0):
+    ratio   = 2.0 ** ((int(target_midi) - int(base_midi)) / 12.0)
+    old_len = base_array.shape[0]
+    new_len = max(1, int(old_len / ratio))
+    old_pos = np.arange(old_len, dtype=np.float32)
+    new_pos = np.linspace(0, old_len - 1, new_len, dtype=np.float32)
+
+    if base_array.ndim == 1:
+        shifted_f = np.interp(new_pos, old_pos, base_array)
+    else:
+        shifted_f = np.stack(
+            [np.interp(new_pos, old_pos, base_array[:, ch]) for ch in range(base_array.shape[1])],
+            axis=1,
+        )
+
+    if gain != 1.0:
+        shifted_f = np.clip(shifted_f * gain, -32768, 32767)
+
+    return shifted_f.astype(np.float32)
+
+
 def play_shifted_sample(
     sample_filename,
     target_midi,
@@ -53,39 +130,17 @@ def play_shifted_sample(
     try:
         import pygame
 
-        sample_path = next(
-            (p for p in [
-                os.path.join(BASE_DIR, "samples", sample_filename),
-                os.path.join(os.getcwd(), "samples", sample_filename),
-            ] if os.path.exists(p)),
-            None,
-        )
+        sample_path = _find_sample_path(sample_filename)
         if sample_path is None:
             return False
 
         if not pygame.mixer.get_init():
-            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+            pygame.mixer.init(frequency=SAMPLE_RATE, size=-16, channels=2, buffer=512)
 
         base_sound = pygame.mixer.Sound(sample_path)
         base_array = pygame.sndarray.array(base_sound)
-        ratio      = 2.0 ** ((int(target_midi) - int(base_midi)) / 12.0)
-        old_len    = base_array.shape[0]
-        new_len    = max(1, int(old_len / ratio))
-        old_pos    = np.arange(old_len, dtype=np.float32)
-        new_pos    = np.linspace(0, old_len - 1, new_len, dtype=np.float32)
-
-        if base_array.ndim == 1:
-            shifted_f = np.interp(new_pos, old_pos, base_array)
-        else:
-            shifted_f = np.stack(
-                [np.interp(new_pos, old_pos, base_array[:, ch]) for ch in range(base_array.shape[1])],
-                axis=1,
-            )
-
-        if gain != 1.0:
-            shifted_f = np.clip(shifted_f * gain, -32768, 32767)
-
-        shifted = shifted_f.astype(base_array.dtype)
+        shifted_f  = _shift_sample(base_array, target_midi, base_midi, gain=gain)
+        shifted    = shifted_f.astype(base_array.dtype)
 
         snd = pygame.sndarray.make_sound(shifted)
         snd.set_volume(max(0.0, min(1.0, volume)))
@@ -103,29 +158,94 @@ def play_shifted_sample(
         return False
 
 
+
+
+def render_song_to_wav(timeline_items, out_path, song_duration_sec,
+                       max_block_sec=1.2):
+    if not timeline_items:
+        raise ValueError("Timeline is empty.")
+
+    total_samples = int(math.ceil(song_duration_sec * SAMPLE_RATE)) + SAMPLE_RATE
+    mix = np.zeros((total_samples, 2), dtype=np.float32)
+
+    cache = {}
+
+    for item in timeline_items:
+        s = item["sound"]
+        sample_file = s["sample"]
+        if sample_file not in cache:
+            cache[sample_file] = _load_sample_array(sample_file)
+        base = cache[sample_file]
+
+        shifted = _shift_sample(
+            base,
+            target_midi=s["target_midi"],
+            base_midi=s["base_midi"],
+            gain=s.get("gain", 1.0),
+        )
+
+        if shifted.ndim == 1:
+            shifted = np.stack([shifted, shifted], axis=1)
+        elif shifted.shape[1] == 1:
+            shifted = np.concatenate([shifted, shifted], axis=1)
+
+        max_len = int(max_block_sec * SAMPLE_RATE)
+        if shifted.shape[0] > max_len:
+            shifted = shifted[:max_len]
+
+        fade_len = min(int(SAVE_FADE_OUT_SEC * SAMPLE_RATE), shifted.shape[0])
+        if fade_len > 0:
+            ramp = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+            shifted[-fade_len:, 0] *= ramp
+            shifted[-fade_len:, 1] *= ramp
+
+        start = int(item["time_sec"] * SAMPLE_RATE)
+        end   = start + shifted.shape[0]
+        if start >= mix.shape[0]:
+            continue
+        if end > mix.shape[0]:
+            shifted = shifted[: mix.shape[0] - start]
+            end = mix.shape[0]
+        mix[start:end] += shifted
+
+    final_len = int(song_duration_sec * SAMPLE_RATE)
+    mix = mix[:final_len]
+
+    peak = float(np.max(np.abs(mix))) if mix.size else 0.0
+    if peak > 32767:
+        mix = mix * (32767.0 / peak)
+    mix_int16 = np.clip(mix, -32768, 32767).astype(np.int16)
+
+    with wave.open(out_path, "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(mix_int16.tobytes())
+
+
+
+
 class TriangleMusicApp:
-    CANVAS_SIZE = 450
-    POINT_RADIUS = 12
     VOLUME = 1.0
 
-    BASS  = ("bass.mp3",  24, 24, 60, 1.0)  #C1 C1-C4
-    PIANO = ("piano.mp3", 72, 48, 96, 3.0)  #C5 C3-C7
-
-    LIBRARY_WIDTH    = 200
-    TIMELINE_WIDTH   = 760
-    NUM_TRACKS       = 5
-    TRACK_HEIGHT     = 64
-    PIXELS_PER_SEC   = 80
-    SNAP_PX          = 20
-    BLOCK_WIDTH      = PIXELS_PER_SEC
-
-    BASS_COLOR  = "#c62828"
-    PIANO_COLOR = "#1565c0"
+    BASS  = ("bass.mp3",  24, 24, 60, 1.0)
+    PIANO = ("piano.mp3", 72, 48, 96, 3.0)
 
     def __init__(self, root):
         self.root = root
-        self.root.title("GeometryAI")
-        self.root.configure(bg="#1e1e1e")
+
+        self.view = TriangleMusicView(root)
+
+        self.CANVAS_SIZE      = self.view.CANVAS_SIZE
+        self.POINT_RADIUS     = self.view.POINT_RADIUS
+        self.TIMELINE_WIDTH   = self.view.TIMELINE_WIDTH
+        self.NUM_TRACKS       = self.view.NUM_TRACKS
+        self.TRACK_HEIGHT     = self.view.TRACK_HEIGHT
+        self.PIXELS_PER_SEC   = self.view.PIXELS_PER_SEC
+        self.SNAP_PX          = self.view.SNAP_PX
+        self.BLOCK_WIDTH      = self.view.BLOCK_WIDTH
+        self.TIMELINE_SECONDS = self.view.TIMELINE_SECONDS
+        self.timeline_height  = self.view.timeline_height
 
         s = self.CANVAS_SIZE
         self.points = [
@@ -147,113 +267,26 @@ class TriangleMusicApp:
         self.playhead_after_id = None
         self.playhead_start_time = 0.0
 
-        self.timeline_height = self.NUM_TRACKS * self.TRACK_HEIGHT
 
-        container = tk.Frame(root, bg="#1e1e1e")
-        container.pack(padx=12, pady=12, fill="both", expand=True)
+        self.is_playing = False
+        self.is_paused  = False
+        self.playback_started_at = 0.0  
+        self.pause_elapsed = 0.0  
 
-        self.build_section_1(container)
-        self.build_section_2(container)
-        self.build_section_3(container)
+        self.view.on_canvas_down    = self.on_mouse_down
+        self.view.on_canvas_drag    = self.on_mouse_drag
+        self.view.on_canvas_up      = self.on_mouse_up
+        self.view.on_play           = self.play
+        self.view.on_play_timeline  = self.play_or_resume_timeline
+        self.view.on_pause_timeline = self.pause_timeline
+        self.view.on_clear_timeline = self.clear_timeline
+        self.view.on_save_song      = self.save_song
+
+        self.canvas   = self.view.canvas
+        self.timeline = self.view.timeline
 
         self.redraw()
 
-
-    def build_section_1(self, parent):
-        left = tk.Frame(parent, bg="#1e1e1e")
-        left.pack(side="left", fill="y", padx=6)
-
-        self.canvas = tk.Canvas(
-            left, width=self.CANVAS_SIZE, height=self.CANVAS_SIZE, bg="white",
-            highlightthickness=2, highlightbackground="#333",
-        )
-        self.canvas.pack()
-        self.canvas.bind("<Button-1>",        self.on_mouse_down)
-        self.canvas.bind("<B1-Motion>",       self.on_mouse_drag)
-        self.canvas.bind("<ButtonRelease-1>", self.on_mouse_up)
-
-        self.btn_play = tk.Button(
-            left, text="▶ Сыграть звук",
-            command=self.play,
-            bg="#1565c0", fg="white", font=("Arial", 13, "bold"),
-            height=2, relief="flat", cursor="hand2",
-        )
-        self.btn_play.pack(fill="x", pady=(12, 0))
-
-
-    def build_section_2(self, parent):
-        mid = tk.Frame(parent, bg="#1e1e1e", width=self.LIBRARY_WIDTH)
-        mid.pack(side="left", fill="y", padx=6)
-        mid.pack_propagate(False)
-
-        tk.Label(
-            mid, text="Звуки", bg="#1e1e1e", fg="white",
-            font=("Arial", 12, "bold"),
-        ).pack(anchor="w", pady=(2, 6))
-
-        outer = tk.Frame(mid, bg="#2a2a2a", highlightthickness=1, highlightbackground="#444")
-        outer.pack(fill="both", expand=True)
-
-        scrollbar = tk.Scrollbar(outer, orient="vertical")
-        scrollbar.pack(side="right", fill="y")
-
-        self.library_canvas = tk.Canvas(
-            outer, bg="#2a2a2a", highlightthickness=0,
-            yscrollcommand=scrollbar.set,
-        )
-        self.library_canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=self.library_canvas.yview)
-
-        self.library_inner = tk.Frame(self.library_canvas, bg="#2a2a2a")
-        self.library_canvas.create_window((0, 0), window=self.library_inner, anchor="nw")
-        self.library_inner.bind(
-            "<Configure>",
-            lambda e: self.library_canvas.configure(scrollregion=self.library_canvas.bbox("all")),
-        )
-
-
-    def build_section_3(self, parent):
-        right = tk.Frame(parent, bg="#1e1e1e")
-        right.pack(side="left", fill="both", expand=True, padx=6)
-
-        toolbar = tk.Frame(right, bg="#1e1e1e")
-        toolbar.pack(fill="x")
-
-        self.btn_play_timeline = tk.Button(
-            toolbar, text="▶", command=self.play_timeline,
-            bg="#2e7d32", fg="white", font=("Arial", 14, "bold"),
-            width=4, relief="flat", cursor="hand2",
-        )
-        self.btn_play_timeline.pack(side="left")
-
-        self.btn_clear_timeline = tk.Button(
-            toolbar, text="Очистить", command=self.clear_timeline,
-            bg="#555", fg="white", font=("Arial", 10),
-            relief="flat", cursor="hand2",
-        )
-        self.btn_clear_timeline.pack(side="left", padx=6)
-
-        self.timeline = tk.Canvas(
-            right, width=self.TIMELINE_WIDTH, height=self.timeline_height,
-            bg="#202020", highlightthickness=1, highlightbackground="#444",
-        )
-        self.timeline.pack(fill="both", expand=True, pady=(8, 0))
-        self.draw_timeline_grid()
-
-
-    def draw_timeline_grid(self):
-        for tr in range(self.NUM_TRACKS):
-            y0 = tr * self.TRACK_HEIGHT
-            y1 = y0 + self.TRACK_HEIGHT
-            color = "#262626" if tr % 2 == 0 else "#222222"
-            self.timeline.create_rectangle(0, y0, self.TIMELINE_WIDTH, y1, fill=color, outline="")
-            self.timeline.create_line(0, y1, self.TIMELINE_WIDTH, y1, fill="#333")
-        seconds = self.TIMELINE_WIDTH // self.PIXELS_PER_SEC
-        for s in range(seconds + 1):
-            x = s * self.PIXELS_PER_SEC
-            self.timeline.create_line(x, 0, x, self.timeline_height, fill="#2e2e2e")
-            self.timeline.create_text(x + 3, 2, text=f"{s}s", anchor="nw",
-                                      fill="#666", font=("Arial", 8))
 
 
     def on_mouse_down(self, event):
@@ -273,17 +306,12 @@ class TriangleMusicApp:
     def on_mouse_up(self, event):
         self.drag_idx = None
 
-
     def redraw(self):
-        self.canvas.delete("all")
-        pts_flat = [c for pt in self.points for c in pt]
-        self.canvas.create_polygon(pts_flat, outline="black", fill="", width=3)
-        for x, y in self.points:
-            self.canvas.create_oval(
-                x - self.POINT_RADIUS, y - self.POINT_RADIUS,
-                x + self.POINT_RADIUS, y + self.POINT_RADIUS,
-                fill="#23be5a", outline="white", width=2,
-            )
+        self.view.redraw_triangle(self.points)
+        sound = self.compute_current_sound()
+        ttype = classify_triangle(*self.points)
+        self.view.set_info(TYPE_LABEL[ttype], sound["label"])
+
 
 
     def play(self):
@@ -296,7 +324,6 @@ class TriangleMusicApp:
             gain=sound["gain"],
         )
         self.add_to_library(sound)
-
 
     def compute_current_sound(self):
         p1, p2, p3 = self.points
@@ -313,41 +340,37 @@ class TriangleMusicApp:
             "target_midi": target,
             "gain": gain,
         }
+    
+    def check_collision(self, track, time_sec, exclude_item=None):
+        for item in self.timeline_items:
+            if exclude_item is not None and item == exclude_item:
+                continue
+            if item["track"] == track:
+                item_start = item["time_sec"]
+                item_end = item_start + 1.0
+                new_start = time_sec
+                new_end = time_sec + 1.0
+                if not (new_end <= item_start or new_start >= item_end):
+                    return True
+        return False
 
 
     def add_to_library(self, sound):
         self.library.append(sound)
-        color = self.PIANO_COLOR if sound["sample"] == "piano.mp3" else self.BASS_COLOR
-        row = tk.Frame(self.library_inner, bg="#2a2a2a")
-        row.pack(fill="x", pady=2, padx=2)
-
-        swatch = tk.Frame(row, bg=color, width=6)
-        swatch.pack(side="left", fill="y")
-
-        label = tk.Label(
-            row, text=sound["label"], bg="#2a2a2a", fg="white",
-            font=("Arial", 11), anchor="w", cursor="fleur",
+        self.view.add_library_row(
+            sound,
+            on_drag_start=self.start_drag,
+            on_drag_move=self.do_drag,
+            on_drag_end=self.end_drag,
+            on_remove=self.remove_from_library,
         )
-        label.pack(side="left", fill="x", expand=True, padx=8)
-
-        btn = tk.Button(
-            row, text="✕", bg="#5a1a1a", fg="white",
-            relief="flat", cursor="hand2", width=2,
-            font=("Arial", 9, "bold"),
-        )
-        btn.pack(side="right", padx=4, pady=2)
-        btn.config(command=lambda r=row: self.remove_from_library(r))
-
-        label.bind("<ButtonPress-1>",   lambda e, s=sound: self.start_drag(e, s))
-        label.bind("<B1-Motion>",       self.do_drag)
-        label.bind("<ButtonRelease-1>", self.end_drag)
-        swatch.bind("<ButtonPress-1>",  lambda e, s=sound: self.start_drag(e, s))
-        swatch.bind("<B1-Motion>",      self.do_drag)
-        swatch.bind("<ButtonRelease-1>",self.end_drag)
-
 
     def remove_from_library(self, row):
-        row.destroy()
+        for i, sound in enumerate(self.library):
+            if hasattr(row, 'sound_data') and row.sound_data == sound:
+                self.library.pop(i)
+                break
+
 
 
     def start_drag(self, event, sound):
@@ -355,23 +378,13 @@ class TriangleMusicApp:
         if self.drag_ghost is not None:
             try: self.drag_ghost.destroy()
             except Exception: pass
-        ghost = tk.Toplevel(self.root)
-        ghost.overrideredirect(True)
-        ghost.attributes("-topmost", True)
-        try: ghost.attributes("-alpha", 0.85)
-        except Exception: pass
-        color = self.PIANO_COLOR if sound["sample"] == "piano.mp3" else self.BASS_COLOR
-        tk.Label(ghost, text=sound["label"], bg=color, fg="white",
-                 font=("Arial", 11, "bold"), padx=10, pady=4).pack()
-        self.drag_ghost = ghost
+        self.drag_ghost = self.view.make_drag_ghost(sound)
         self.do_drag(event)
-
 
     def do_drag(self, event):
         if self.drag_ghost is None:
             return
         self.drag_ghost.geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
-
 
     def end_drag(self, event):
         if self.drag_sound is None:
@@ -383,10 +396,12 @@ class TriangleMusicApp:
 
         tl_x = self.timeline.winfo_rootx()
         tl_y = self.timeline.winfo_rooty()
-        rel_x = event.x_root - tl_x
-        rel_y = event.y_root - tl_y
+        rel_x_visible = event.x_root - tl_x
+        rel_y         = event.y_root - tl_y
 
-        if 0 <= rel_x <= self.TIMELINE_WIDTH and 0 <= rel_y <= self.timeline_height:
+        if 0 <= rel_x_visible <= self.timeline.winfo_width() and 0 <= rel_y <= self.timeline_height:
+            scroll_offset = self.timeline.canvasx(0)
+            rel_x = rel_x_visible + scroll_offset
             track    = max(0, min(self.NUM_TRACKS - 1, int(rel_y // self.TRACK_HEIGHT)))
             time_sec = max(0.0, rel_x / self.PIXELS_PER_SEC)
             self.add_to_timeline(self.drag_sound, track, time_sec)
@@ -394,101 +409,130 @@ class TriangleMusicApp:
         self.drag_sound = None
 
 
+
     def add_to_timeline(self, sound, track, time_sec):
+        if self.check_collision(track, time_sec):
+            return
+        
         x = round(time_sec * self.PIXELS_PER_SEC / self.SNAP_PX) * self.SNAP_PX
         if x + self.BLOCK_WIDTH > self.TIMELINE_WIDTH:
             x = self.TIMELINE_WIDTH - self.BLOCK_WIDTH
         x = max(0, x)
         y = track * self.TRACK_HEIGHT
-        color = self.PIANO_COLOR if sound["sample"] == "piano.mp3" else self.BASS_COLOR
 
-        rect_id = self.timeline.create_rectangle(
-            x, y + 6, x + self.BLOCK_WIDTH, y + self.TRACK_HEIGHT - 6,
-            fill=color, outline="white", width=1,
-        )
-        text_id = self.timeline.create_text(
-            x + self.BLOCK_WIDTH / 2, y + self.TRACK_HEIGHT / 2,
-            text=sound["label"], fill="white", font=("Arial", 10, "bold"),
-        )
+        rect_id, text_id, tag = self.view.draw_timeline_block(x, y, sound)
 
         item = {
             "sound": sound, "track": track, "time_sec": x / self.PIXELS_PER_SEC,
-            "rect_id": rect_id, "text_id": text_id,
+            "rect_id": rect_id, "text_id": text_id, "tag": tag,
         }
         self.timeline_items.append(item)
 
-        for cid in (rect_id, text_id):
-            self.timeline.tag_bind(cid, "<Button-3>",
-                                   lambda e, it=item: self.remove_timeline_item(it))
-            self.timeline.tag_bind(cid, "<ButtonPress-1>",
-                                   lambda e, it=item: self.start_block_drag(e, it))
-            self.timeline.tag_bind(cid, "<B1-Motion>",
-                                   self.do_block_drag)
-            self.timeline.tag_bind(cid, "<ButtonRelease-1>",
-                                   self.end_block_drag)
-
+        self.timeline.tag_bind(tag, "<Button-3>",
+                               lambda e, it=item: self.remove_timeline_item(it))
+        self.timeline.tag_bind(tag, "<ButtonPress-1>",
+                               lambda e, it=item: self.start_block_drag(e, it))
+        self.timeline.tag_bind(tag, "<B1-Motion>",
+                               self.do_block_drag)
+        self.timeline.tag_bind(tag, "<ButtonRelease-1>",
+                               self.end_block_drag)
 
     def start_block_drag(self, event, item):
         self.moving_item = item
-        bbox = self.timeline.coords(item["rect_id"])
-        self.move_offset_x = event.x - bbox[0]
-        self.timeline.tag_raise(item["rect_id"])
-        self.timeline.tag_raise(item["text_id"])
+        self.moving_item["_old_track"] = item["track"]
+        self.moving_item["_old_time"] = item["time_sec"]
+        bbox = self.timeline.bbox(item["tag"])
+        if bbox is None:
+            return
+        canvas_x = self.timeline.canvasx(event.x)
+        self.move_offset_x = canvas_x - bbox[0]
+        self.timeline.tag_raise(item["tag"])
         if self.playhead_id is not None:
             self.timeline.tag_raise(self.playhead_id)
-
 
     def do_block_drag(self, event):
         item = self.moving_item
         if item is None:
             return
-        new_x = event.x - self.move_offset_x
+        canvas_x = self.timeline.canvasx(event.x)
+        canvas_y = self.timeline.canvasy(event.y)
+        new_x = canvas_x - self.move_offset_x
         new_x = round(new_x / self.SNAP_PX) * self.SNAP_PX
         new_x = max(0, min(self.TIMELINE_WIDTH - self.BLOCK_WIDTH, new_x))
-        track = max(0, min(self.NUM_TRACKS - 1, int(event.y // self.TRACK_HEIGHT)))
+        track = max(0, min(self.NUM_TRACKS - 1, int(canvas_y // self.TRACK_HEIGHT)))
         new_y = track * self.TRACK_HEIGHT
-        self.timeline.coords(
-            item["rect_id"],
-            new_x, new_y + 6,
-            new_x + self.BLOCK_WIDTH, new_y + self.TRACK_HEIGHT - 6,
-        )
-        self.timeline.coords(
-            item["text_id"],
-            new_x + self.BLOCK_WIDTH / 2,
-            new_y + self.TRACK_HEIGHT / 2,
-        )
-        item["track"] = track
-        item["time_sec"] = new_x / self.PIXELS_PER_SEC
-
+        new_time = new_x / self.PIXELS_PER_SEC
+        
+        if not self.check_collision(track, new_time, exclude_item=item):
+            self.view.move_timeline_block(item, new_x, new_y)
+            item["track"] = track
+            item["time_sec"] = new_time
 
     def end_block_drag(self, event):
+        if self.moving_item is None:
+            return
+        
+        new_track = self.moving_item["track"]
+        new_time = self.moving_item["time_sec"]
+        
+        if self.check_collision(new_track, new_time, exclude_item=self.moving_item):
+            old_track = self.moving_item.get("_old_track", new_track)
+            old_time = self.moving_item.get("_old_time", new_time)
+            old_x = old_time * self.PIXELS_PER_SEC
+            old_y = old_track * self.TRACK_HEIGHT
+            self.view.move_timeline_block(self.moving_item, old_x, old_y)
+            self.moving_item["track"] = old_track
+            self.moving_item["time_sec"] = old_time
+        
         self.moving_item = None
 
-
     def remove_timeline_item(self, item):
-        try: self.timeline.delete(item["rect_id"])
-        except Exception: pass
-        try: self.timeline.delete(item["text_id"])
-        except Exception: pass
+        self.view.delete_timeline_block(item)
         if item in self.timeline_items:
             self.timeline_items.remove(item)
 
-
     def clear_timeline(self):
+
+        self._stop_playback_state()
         for item in list(self.timeline_items):
             self.remove_timeline_item(item)
-        self.stop_playhead()
 
 
-    def play_timeline(self):
+
+    def play_or_resume_timeline(self):
+
+        if self.is_paused:
+            self._resume_timeline()
+        else:
+            self._start_timeline_from(0.0)
+
+    def _start_timeline_from(self, start_sec):
+
+
         for aid in self.scheduled_after_ids:
             try: self.root.after_cancel(aid)
             except Exception: pass
         self.scheduled_after_ids.clear()
-        self.stop_playhead()
+        self._stop_playhead_timer()
+
+
+        try:
+            import pygame
+            if pygame.mixer.get_init():
+                pygame.mixer.unpause()
+        except Exception:
+            pass
+
+        if not self.timeline_items:
+            self._reset_play_state()
+            return
+
 
         for item in self.timeline_items:
-            delay_ms = int(item["time_sec"] * 1000)
+            t = item["time_sec"]
+            if t < start_sec - 0.001:
+                continue
+            delay_ms = int((t - start_sec) * 1000)
             s = item["sound"]
             aid = self.root.after(delay_ms, lambda snd=s: threading.Thread(
                 target=play_shifted_sample,
@@ -503,42 +547,153 @@ class TriangleMusicApp:
             ).start())
             self.scheduled_after_ids.append(aid)
 
-        if self.timeline_items:
-            self.start_playhead()
 
+        self.playback_started_at = time.perf_counter() - start_sec
+        self.pause_elapsed = 0.0
+        self.is_playing = True
+        self.is_paused = False
+        self.view.set_play_button_state(is_paused=False)
 
-    def start_playhead(self):
-        self.playhead_id = self.timeline.create_line(
-            0, 0, 0, self.timeline_height,
-            fill="#ffd54f", width=2,
-        )
-        self.timeline.tag_raise(self.playhead_id)
-        self.playhead_start_time = time.perf_counter()
-        self.tick_playhead()
+        self._start_playhead(from_sec=start_sec)
 
-
-    def tick_playhead(self):
-        if self.playhead_id is None:
+    def pause_timeline(self):
+        if not self.is_playing or self.is_paused:
             return
-        dt = time.perf_counter() - self.playhead_start_time
-        x = dt * self.PIXELS_PER_SEC
-        if x >= self.TIMELINE_WIDTH:
-            self.stop_playhead()
-            return
-        self.timeline.coords(self.playhead_id, x, 0, x, self.timeline_height)
-        self.playhead_after_id = self.root.after(20, self.tick_playhead)
 
 
-    def stop_playhead(self):
-        if self.playhead_after_id is not None:
-            try: self.root.after_cancel(self.playhead_after_id)
+        for aid in self.scheduled_after_ids:
+            try: self.root.after_cancel(aid)
             except Exception: pass
-            self.playhead_after_id = None
+        self.scheduled_after_ids.clear()
+
+        try:
+            import pygame
+            if pygame.mixer.get_init():
+                pygame.mixer.pause()
+        except Exception:
+            pass
+
+        self.pause_elapsed = time.perf_counter() - self.playback_started_at
+        self.pause_elapsed = max(0.0, min(self.pause_elapsed, float(self.TIMELINE_SECONDS)))
+        self.is_paused = True
+
+
+        self._stop_playhead_timer()
+        if self.playhead_id is not None:
+            x = self.pause_elapsed * self.PIXELS_PER_SEC
+            self.timeline.coords(self.playhead_id, x, 0, x, self.timeline_height)
+
+        self.view.set_play_button_state(is_paused=True)
+
+    def _resume_timeline(self):
+        if not self.is_paused:
+            return
+        self._start_timeline_from(self.pause_elapsed)
+
+    def _reset_play_state(self):
+        self.is_playing = False
+        self.is_paused = False
+        self.pause_elapsed = 0.0
+        self.view.set_play_button_state(is_paused=False)
+
+    def _stop_playback_state(self):
+        for aid in self.scheduled_after_ids:
+            try: self.root.after_cancel(aid)
+            except Exception: pass
+        self.scheduled_after_ids.clear()
+
+        try:
+            import pygame
+            if pygame.mixer.get_init():
+                pygame.mixer.stop()
+        except Exception:
+            pass
+
+        self._stop_playhead_timer()
         if self.playhead_id is not None:
             try: self.timeline.delete(self.playhead_id)
             except Exception: pass
             self.playhead_id = None
 
+        self._reset_play_state()
+
+
+    def _start_playhead(self, from_sec=0.0):
+        if self.playhead_id is None:
+            self.playhead_id = self.view.create_playhead()
+        x = from_sec * self.PIXELS_PER_SEC
+        self.timeline.coords(self.playhead_id, x, 0, x, self.timeline_height)
+        self.playhead_start_time = time.perf_counter() - from_sec
+        self._tick_playhead()
+
+    def _tick_playhead(self):
+        if self.playhead_id is None or self.is_paused:
+            return
+        dt = time.perf_counter() - self.playhead_start_time
+        x = dt * self.PIXELS_PER_SEC
+        if x >= self.TIMELINE_WIDTH:
+            self._stop_playback_state()
+            return
+        self.timeline.coords(self.playhead_id, x, 0, x, self.timeline_height)
+        self.playhead_after_id = self.root.after(20, self._tick_playhead)
+
+    def _stop_playhead_timer(self):
+        if self.playhead_after_id is not None:
+            try: self.root.after_cancel(self.playhead_after_id)
+            except Exception: pass
+            self.playhead_after_id = None
+
+
+    def save_song(self):
+        if not self.timeline_items:
+            messagebox.showinfo("SoundGeometry",
+                                "Timeline is empty — nothing to save.")
+            return
+
+        missing = []
+        for it in self.timeline_items:
+            name = it["sound"]["sample"]
+            if _find_sample_path(name) is None and name not in missing:
+                missing.append(name)
+        if missing:
+            messagebox.showerror(
+                "SoundGeometry",
+                "Cannot find sample files:\n  " + "\n  ".join(missing) +
+                f"\n\nExpected location: {os.path.join(BASE_DIR, 'samples')}"
+            )
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Save song",
+            defaultextension=".wav",
+            filetypes=[("WAV audio", "*.wav")],
+            initialfile="soundgeometry_song.wav",
+        )
+        if not path:
+            return
+
+        last_end = max(it["time_sec"] for it in self.timeline_items) + 1.2
+        duration = min(last_end, float(self.TIMELINE_SECONDS))
+
+        def _worker():
+            old_text = self.view.btn_save.cget("text")
+            try:
+                self.root.after(0, lambda: self.view.btn_save.configure(
+                    text="SAVING…", state="disabled"))
+                render_song_to_wav(self.timeline_items, path, duration)
+                self.root.after(0, lambda: messagebox.showinfo(
+                    "SoundGeometry", f"Saved:\n{path}"
+                ))
+            except Exception as e:
+                err = str(e)
+                self.root.after(0, lambda: messagebox.showerror(
+                    "SoundGeometry", f"Save failed:\n{err}"
+                ))
+            finally:
+                self.root.after(0, lambda: self.view.btn_save.configure(
+                    text=old_text, state="normal"))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
 
 if __name__ == "__main__":
