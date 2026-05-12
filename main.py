@@ -355,6 +355,9 @@ class TriangleMusicApp:
         }
 
     def add_to_library(self, sound):
+        for existing in self.library:
+            if existing["label"] == sound["label"] and existing["sample"] == sound["sample"]:
+                return
         self.library.append(sound)
         self.view.add_library_row(
             sound,
@@ -365,7 +368,13 @@ class TriangleMusicApp:
         )
 
     def remove_from_library(self, row):
-        pass
+        sound = self.view.get_row_sound(row)
+        if sound:
+            self.library = [
+                s for s in self.library
+                if not (s["label"] == sound["label"] and s["sample"] == sound["sample"])
+            ]
+        self.view.remove_library_row(row)
 
     def start_drag(self, event, sound):
         self.drag_sound = sound

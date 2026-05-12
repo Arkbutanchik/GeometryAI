@@ -1,9 +1,6 @@
 import os
 import tkinter as tk
 
-# ─────────────────────────── ТЕМА ОФОРМЛЕНИЯ ───────────────────────────
-
-
 class Theme:
     BG_APP = "#1a1b1e"
     BG_PANEL = "#22242a"
@@ -47,10 +44,6 @@ class Theme:
     FONT_BUTTON = ("Segoe UI", 11, "bold")
     FONT_BIG_BTN = ("Segoe UI", 12, "bold")
 
-
-# ─────────────────────────── ВСПОМОГАТЕЛЬНЫЕ ВИДЖЕТЫ ───────────────────────────
-
-
 class HoverButton(tk.Button):
     def __init__(self, master, bg, hover_bg, fg=Theme.FG_PRIMARY, **kw):
         super().__init__(
@@ -82,7 +75,6 @@ class HoverButton(tk.Button):
             cfg["text"] = text
         self.configure(**cfg)
 
-
 def make_panel(parent, **kw):
     return tk.Frame(
         parent,
@@ -91,7 +83,6 @@ def make_panel(parent, **kw):
         highlightbackground=Theme.BORDER,
         **kw,
     )
-
 
 def _rounded_rect_points(x1, y1, x2, y2, r):
     r = max(0, min(r, (x2 - x1) // 2, (y2 - y1) // 2))
@@ -137,10 +128,6 @@ def _rounded_rect_points(x1, y1, x2, y2, r):
         x1 + r,
         y1,
     ]
-
-
-# ─────────────────────────── ОСНОВНОЙ КЛАСС ИНТЕРФЕЙСА ───────────────────────────
-
 
 class TriangleMusicView:
 
@@ -194,8 +181,6 @@ class TriangleMusicView:
         self._build_header()
         self._build_body()
 
-    # ─────────────────────────── ШАПКА ───────────────────────────
-
     def _build_header(self):
         header = tk.Frame(self.root, bg=Theme.BG_HEADER, height=58)
         header.pack(fill="x", side="top")
@@ -204,7 +189,6 @@ class TriangleMusicView:
         left = tk.Frame(header, bg=Theme.BG_HEADER)
         left.pack(side="left", fill="y", padx=18)
 
-        # ТОЛЬКО изображение, без отрисованного фолбэка
         tk.Label(
             left,
             text="SoundGeometryAI",
@@ -229,8 +213,6 @@ class TriangleMusicView:
 
         tk.Frame(self.root, bg=Theme.BORDER, height=1).pack(fill="x")
 
-    # ─────────────────────────── ТЕЛО ───────────────────────────
-
     def _build_body(self):
         container = tk.Frame(self.root, bg=Theme.BG_APP)
         container.pack(padx=14, pady=14, fill="both", expand=True)
@@ -238,8 +220,6 @@ class TriangleMusicView:
         self._build_section_draw(container)
         self._build_section_library(container)
         self._build_section_timeline(container)
-
-    # ─────────────────────────── СЕКЦИЯ 1: РИСОВАНИЕ ───────────────────────────
 
     def _build_section_draw(self, parent):
         panel = make_panel(parent)
@@ -271,7 +251,6 @@ class TriangleMusicView:
             "<ButtonRelease-1>", lambda e: self.on_canvas_up and self.on_canvas_up(e)
         )
 
-        # инфо-строка: TYPE + NOTE
         self.info_frame = tk.Frame(
             panel,
             bg=Theme.BG_PANEL_ALT,
@@ -319,7 +298,6 @@ class TriangleMusicView:
         )
         self.lbl_note.pack(anchor="w")
 
-        # без значка ▶
         self.btn_play = HoverButton(
             panel,
             text="PLAY SOUND",
@@ -330,8 +308,6 @@ class TriangleMusicView:
             command=lambda: self.on_play and self.on_play(),
         )
         self.btn_play.pack(fill="x", padx=14, pady=(0, 14), ipady=10)
-
-    # ─────────────────────────── СЕКЦИЯ 2: БИБЛИОТЕКА ───────────────────────────
 
     def _build_section_library(self, parent):
         panel = make_panel(parent, width=self.LIBRARY_WIDTH)
@@ -399,8 +375,8 @@ class TriangleMusicView:
             self._shelves.append(shelf)
 
         self._next_shelf_idx = 0
-
-    # ─────────────────────────── СЕКЦИЯ 3: ТАЙМЛАЙН ───────────────────────────
+        self._row_sound_map = {}
+        self._library_entries = []
 
     def _build_section_timeline(self, parent):
         panel = make_panel(parent)
@@ -411,7 +387,6 @@ class TriangleMusicView:
         toolbar = tk.Frame(panel, bg=Theme.BG_PANEL)
         toolbar.pack(fill="x", padx=14, pady=(2, 8))
 
-        # PLAY (без значка ▶) — кнопка переключается между PLAY и PAUSE
         self.btn_play_timeline = HoverButton(
             toolbar,
             text="PLAY",
@@ -423,7 +398,6 @@ class TriangleMusicView:
         )
         self.btn_play_timeline.pack(side="left", ipadx=18, ipady=6)
 
-        # отдельная кнопка PAUSE
         self.btn_pause_timeline = HoverButton(
             toolbar,
             text="PAUSE",
@@ -446,14 +420,11 @@ class TriangleMusicView:
         )
         self.btn_clear_timeline.pack(side="left", padx=0, ipadx=14, ipady=6)
 
-        # ── scrollers: BPM / VOL / REV ────────────────
         self._bpm_var = tk.StringVar(value="120 BPM")
         self._make_scroller(toolbar, self._bpm_var, self._bpm_dec, self._bpm_inc)
 
         self._vol_var = tk.StringVar(value="100% VOL")
         self._make_scroller(toolbar, self._vol_var, self._vol_dec, self._vol_inc)
-
-        # подпись с количеством дорожек и длительностью УБРАНА
 
         tl_wrap = tk.Frame(panel, bg=Theme.BORDER, padx=1, pady=1)
         tl_wrap.pack(fill="both", expand=True, padx=14, pady=(0, 8))
@@ -486,8 +457,6 @@ class TriangleMusicView:
         self.timeline.bind("<Leave>", lambda e: self._unbind_wheel())
 
         self._draw_timeline_grid()
-
-    # ───────────────────────── SCROLLER FACTORY ─────────────────────────
 
     def _make_scroller(self, parent, textvariable, dec_cmd, inc_cmd):
         wrap = tk.Frame(
@@ -536,8 +505,6 @@ class TriangleMusicView:
             command=inc_cmd,
         ).pack(side="left", ipady=3)
 
-    # ───────────────────────────────── BPM ─────────────────────────────────
-
     def _bpm_dec(self):
         self._bpm = max(self.BPM_MIN, self._bpm - self.BPM_STEP)
         self._bpm_var.set(f"{self._bpm} BPM")
@@ -552,8 +519,6 @@ class TriangleMusicView:
 
     def get_bpm(self):
         return self._bpm
-
-    # ─────────────────────────────── VOLUME ───────────────────────────────
 
     def _vol_dec(self):
         self._volume = max(self.VOL_MIN, self._volume - self.VOL_STEP)
@@ -586,8 +551,6 @@ class TriangleMusicView:
 
     def _on_wheel(self, e):
         self.timeline.xview_scroll(-1 if e.delta > 0 else 1, "units")
-
-    # ─────────────────────────── ОТРИСОВКА ───────────────────────────
 
     def _panel_header(self, parent, num, title):
         h = tk.Frame(parent, bg=Theme.BG_PANEL)
@@ -663,18 +626,16 @@ class TriangleMusicView:
                 tags=("static_grid",),
             )
 
-        # draw initial beat grid at default 120 BPM
         self.redraw_beat_grid(120)
 
     def redraw_beat_grid(self, bpm):
         """Erase and redraw beat subdivision lines for the given BPM."""
         self.timeline.delete("beat_grid")
-        beat_px = (60.0 / bpm) * self.PIXELS_PER_SEC  # pixels between beats
-        if beat_px < 4:  # too dense to draw usefully
+        beat_px = (60.0 / bpm) * self.PIXELS_PER_SEC
+        if beat_px < 4:
             return
         x = beat_px
         while x < self.TIMELINE_WIDTH:
-            # skip positions that coincide with a second marker (already drawn)
             if abs(x - round(x / self.PIXELS_PER_SEC) * self.PIXELS_PER_SEC) > 2:
                 self.timeline.create_line(
                     x,
@@ -686,11 +647,8 @@ class TriangleMusicView:
                     tags=("beat_grid",),
                 )
             x += beat_px
-        # keep beat lines below track backgrounds and blocks
         self.timeline.tag_lower("beat_grid")
         self.timeline.tag_lower("static_grid")
-
-    # ─────────────────────────── API ДЛЯ КОНТРОЛЛЕРА ───────────────────────────
 
     def redraw_triangle(self, points):
         self.canvas.delete("all")
@@ -769,6 +727,13 @@ class TriangleMusicView:
 
         item = tk.Frame(shelf, bg=Theme.BG_PANEL_ALT)
         item.pack(fill="both", expand=True, padx=4, pady=3)
+        self._row_sound_map[item] = sound
+        self._library_entries.append((sound, {
+            "on_drag_start": on_drag_start,
+            "on_drag_move": on_drag_move,
+            "on_drag_end": on_drag_end,
+            "on_remove": on_remove,
+        }))
 
         swatch = tk.Frame(item, bg=color, width=3)
         swatch.pack(side="left", fill="y")
@@ -779,7 +744,6 @@ class TriangleMusicView:
         line = tk.Frame(text_box, bg=Theme.BG_PANEL_ALT)
         line.pack(fill="x", expand=True, pady=4)
 
-        # без значка ♪
         lbl_note = tk.Label(
             line,
             text=sound["label"],
@@ -801,9 +765,6 @@ class TriangleMusicView:
 
         def _remove():
             on_remove(item)
-            for w in item.winfo_children():
-                w.destroy()
-            item.destroy()
 
         btn = HoverButton(
             item,
@@ -824,6 +785,35 @@ class TriangleMusicView:
 
         return item
 
+    def get_row_sound(self, row):
+        return self._row_sound_map.get(row)
+
+    def remove_library_row(self, row):
+        sound_to_remove = self._row_sound_map.pop(row, None)
+
+        remaining = [
+            (s, cbs) for s, cbs in self._library_entries
+            if not (
+                sound_to_remove
+                and s["label"] == sound_to_remove["label"]
+                and s["sample"] == sound_to_remove["sample"]
+            )
+        ]
+
+        for shelf in self._shelves:
+            for child in list(shelf.winfo_children()):
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+
+        self._library_entries = []
+        self._row_sound_map = {}
+        self._next_shelf_idx = 0
+
+        for sound, cbs in remaining:
+            self.add_library_row(sound, **cbs)
+
     def make_drag_ghost(self, sound):
         ghost = tk.Toplevel(self.root)
         ghost.overrideredirect(True)
@@ -837,7 +827,6 @@ class TriangleMusicView:
         )
         wrap = tk.Frame(ghost, bg=color)
         wrap.pack()
-        # без значка ♪
         tk.Label(
             wrap,
             text=sound["label"],
@@ -848,8 +837,6 @@ class TriangleMusicView:
             pady=6,
         ).pack()
         return ghost
-
-    # ─────────────────────────── БЛОКИ НА ТАЙМЛАЙНЕ ───────────────────────────
 
     def draw_timeline_block(self, x, y, sound):
         """Скруглённый блок, без значка ноты, без тени; все элементы — под одним тегом."""
